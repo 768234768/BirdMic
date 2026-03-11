@@ -19,11 +19,91 @@ Raspberry Pi field recorder with a web dashboard for real-time audio monitoring,
 | INMP441 MEMS microphone | Audio input (I2S) |
 | Google VoiceHAT (or direct I2S wiring) | Audio interface |
 
+## Pi Audio Setup (Required Before First Run)
+
+The INMP441 is an I2S microphone — it won't work until the Pi's operating system is configured to use it.
+
+### 1. Enable the I2S overlay
+
+Edit your boot config:
+
+```bash
+sudo nano /boot/firmware/config.txt
+```
+
+> On older Pi OS versions the file may be at `/boot/config.txt` instead.
+
+Add this line at the bottom:
+
+```
+dtoverlay=googlevoicehat-soundcard
+```
+
+Save (Ctrl+O, Enter, Ctrl+X) and reboot:
+
+```bash
+sudo reboot
+```
+
+### 2. Verify the hardware is detected
+
+After reboot, check that ALSA sees the sound card:
+
+```bash
+arecord -l
+```
+
+You should see output like:
+
+```
+card 0: sndrpigooglevoi [snd_rpi_googlevoicehat_soundcar], device 0: ...
+```
+
+If you see **"no soundcards found"**, double-check your I2S wiring and the `dtoverlay` line above.
+
+### 3. Find the device index
+
+Run this to list audio devices as Python sees them:
+
+```bash
+python3 -c "
+import pyaudio
+p = pyaudio.PyAudio()
+for i in range(p.get_device_count()):
+    d = p.get_device_info_by_index(i)
+    if d['maxInputChannels'] > 0:
+        print(f'ID {i}: {d[\"name\"]}')
+p.terminate()
+"
+```
+
+The recorder auto-detects the first available input device, so this step is just for verification. You should see your VoiceHAT / INMP441 listed.
+
+### 4. (Optional) Silence ALSA warnings
+
+ALSA prints harmless warnings about missing PCM devices (surround, modem, etc.) on every Pi. To suppress them, create `~/.asoundrc`:
+
+```bash
+cat > ~/.asoundrc << 'EOF'
+pcm.!default {
+    type hw
+    card 0
+}
+ctl.!default {
+    type hw
+    card 0
+}
+EOF
+```
+
+Replace `card 0` with the card number from `arecord -l` if different.
+
 ## Quick Start
 
 ```bash
 git clone https://github.com/YOUR_USERNAME/bird-recorder.git ~/Desktop/bird
 cd ~/Desktop/bird
+sudo apt install -y portaudio19-dev
 python3 -m venv env
 source env/bin/activate
 pip install -r requirements.txt
