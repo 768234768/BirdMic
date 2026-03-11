@@ -1,0 +1,6 @@
+env/
+recordings/
+__pycache__/
+config.json
+output.log
+*.pyc
