@@ -39,7 +39,7 @@ Add this line at the bottom:
 dtoverlay=googlevoicehat-soundcard
 ```
 
-Save (Ctrl+O, Enter, Ctrl+X) and reboot:
+Save and reboot:
 
 ```bash
 sudo reboot
