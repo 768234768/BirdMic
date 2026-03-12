@@ -31,7 +31,7 @@ Edit your boot config:
 sudo nano /boot/firmware/config.txt
 ```
 
-> On older Pi OS versions the file may be at `/boot/config.txt` instead.
+> On older Raspberry Pi OS versions this file may be at `/boot/config.txt` instead.
 
 Add this line at the bottom:
 
@@ -45,9 +45,9 @@ Save (Ctrl+O, Enter, Ctrl+X) and reboot:
 sudo reboot
 ```
 
-### 2. Verify the hardware is detected
+### 2. Verify the device is detected
 
-After reboot, check that ALSA sees the sound card:
+After reboot, run:
 
 ```bash
 arecord -l
@@ -61,9 +61,9 @@ card 0: sndrpigooglevoi [snd_rpi_googlevoicehat_soundcar], device 0: ...
 
 If you see **"no soundcards found"**, double-check your I2S wiring and the `dtoverlay` line above.
 
-### 3. Find the device index
+### 3. Find the device index (optional)
 
-Run this to list audio devices as Python sees them:
+The recorder auto-detects the first available input device. To verify which index it picks up:
 
 ```bash
 python3 -c "
@@ -77,11 +77,9 @@ p.terminate()
 "
 ```
 
-The recorder auto-detects the first available input device, so this step is just for verification. You should see your VoiceHAT / INMP441 listed.
+### 4. Silence ALSA warnings (optional)
 
-### 4. (Optional) Silence ALSA warnings
-
-ALSA prints harmless warnings about missing PCM devices (surround, modem, etc.) on every Pi. To suppress them, create `~/.asoundrc`:
+The "Unknown PCM" warnings in the log are ALSA looking for speakers and surround hardware that don't exist on a Pi. To suppress them, create `~/.asoundrc`:
 
 ```bash
 cat > ~/.asoundrc << 'EOF'
@@ -96,14 +94,13 @@ ctl.!default {
 EOF
 ```
 
-Replace `card 0` with the card number from `arecord -l` if different.
+Replace `card 0` with your card number from `arecord -l` if different.
 
 ## Quick Start
 
 ```bash
 git clone https://github.com/YOUR_USERNAME/bird-recorder.git ~/Desktop/bird
 cd ~/Desktop/bird
-sudo apt install -y portaudio19-dev
 python3 -m venv env
 source env/bin/activate
 pip install -r requirements.txt

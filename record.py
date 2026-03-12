@@ -34,6 +34,7 @@ FORMAT = pyaudio.paInt16
 CHANNELS = 1
 RATE = 48000
 SAMPLE_WIDTH = 2
+MAX_CHUNK_SECS = 45 * 60
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SAVE_DIR = os.path.join(BASE_DIR, 'recordings')
@@ -51,7 +52,7 @@ class AppState:
         self.recording_start_time = None
         self.mode = 'continuous'
         self.current_dbfs = -100.0
-        self.frames = []
+        self.wav_writer = None
         self.vad_active = False
         self.vad_triggered_at = None
         self.schedule_active = False
@@ -162,28 +163,67 @@ def build_bext_chunk(metadata):
 
 
 def save_wav_with_bwf(filepath, frames, metadata):
-    """Write WAV then inject a BWF bext chunk."""
+    """Legacy helper — writes frames list to WAV then injects BWF."""
     os.makedirs(os.path.dirname(filepath), exist_ok=True)
-
-    p = pyaudio.PyAudio()
     wf = wave.open(filepath, 'wb')
     wf.setnchannels(CHANNELS)
-    wf.setsampwidth(p.get_sample_size(FORMAT))
+    wf.setsampwidth(SAMPLE_WIDTH)
     wf.setframerate(RATE)
     wf.writeframes(b''.join(frames))
     wf.close()
-    p.terminate()
+    _inject_bwf_metadata(filepath, metadata)
 
+# ─────────────────────────────────────────────
+# Streaming WAV Writer (writes to disk in real-time)
+# ─────────────────────────────────────────────
+class WavWriter:
+    """Streams audio frames directly to a WAV file on disk so data is never
+    lost to a crash, and RAM stays flat regardless of recording duration."""
+
+    def __init__(self, directory, metadata):
+        os.makedirs(directory, exist_ok=True)
+        ts = datetime.now().strftime('%Y%m%d_%H%M%S')
+        self.filepath = os.path.join(directory, f"bird_{ts}.wav")
+        self.metadata = dict(metadata)
+        self.chunk_start = time.time()
+        self.frame_count = 0
+
+        self._wf = wave.open(self.filepath, 'wb')
+        self._wf.setnchannels(CHANNELS)
+        self._wf.setsampwidth(SAMPLE_WIDTH)
+        self._wf.setframerate(RATE)
+
+    def write(self, data):
+        self._wf.writeframes(data)
+        self.frame_count += 1
+
+    def elapsed(self):
+        return time.time() - self.chunk_start
+
+    def close(self):
+        if self._wf is None:
+            return None
+        self._wf.close()
+        self._wf = None
+        if self.frame_count == 0:
+            try:
+                os.remove(self.filepath)
+            except OSError:
+                pass
+            return None
+        _inject_bwf_metadata(self.filepath, self.metadata)
+        print(f"Saved {self.filepath} ({self.frame_count} chunks, {self.elapsed():.0f}s)")
+        return self.filepath
+
+
+def _inject_bwf_metadata(filepath, metadata):
     if not any(metadata.get(k) for k in ('location', 'project', 'recorder_id', 'description')):
         return
-
     try:
         with open(filepath, 'rb') as f:
             data = bytearray(f.read())
-
         if data[:4] != b'RIFF' or data[8:12] != b'WAVE':
             return
-
         bext = build_bext_chunk(metadata)
         pos = 12
         while pos < len(data) - 8:
@@ -196,14 +236,13 @@ def save_wav_with_bwf(filepath, frames, metadata):
             pos = next_pos
         else:
             return
-
         data[insert_at:insert_at] = bext
         struct.pack_into('<I', data, 4, len(data) - 8)
-
         with open(filepath, 'wb') as f:
             f.write(data)
     except Exception as e:
         print(f"BWF inject warning: {e}")
+
 
 # ─────────────────────────────────────────────
 # Recording helpers
@@ -214,7 +253,10 @@ def _start_recording():
             return
         state.recording = True
         state.recording_start_time = time.time()
-        state.frames = list(state.pre_buffer)
+        writer = WavWriter(state.save_dir, state.metadata)
+        for chunk in state.pre_buffer:
+            writer.write(chunk)
+        state.wav_writer = writer
     print(f"Recording started ({state.mode} mode)")
 
 
@@ -224,18 +266,20 @@ def _stop_and_save():
             return
         state.recording = False
         state.vad_active = False
-        frames_copy = list(state.frames)
-        state.frames = []
+        writer = state.wav_writer
+        state.wav_writer = None
 
-    if not frames_copy:
-        print("No audio captured, skipping save.")
-        return
+    if writer:
+        writer.close()
 
-    ts = datetime.now().strftime('%Y%m%d_%H%M%S')
-    filename = f"bird_{ts}.wav"
-    filepath = os.path.join(state.save_dir, filename)
-    save_wav_with_bwf(filepath, frames_copy, state.metadata)
-    print(f"Saved {filepath} ({len(frames_copy)} chunks)")
+
+def _rotate_file():
+    """Close current file and open a new one for the next segment."""
+    with state.lock:
+        old_writer = state.wav_writer
+        state.wav_writer = WavWriter(state.save_dir, state.metadata)
+    if old_writer:
+        old_writer.close()
 
 # ─────────────────────────────────────────────
 # Audio Engine (runs continuously)
@@ -274,8 +318,18 @@ def audio_engine():
         state.pre_buffer.append(data)
 
         with state.lock:
-            if state.recording:
-                state.frames.append(data)
+            if state.recording and state.wav_writer:
+                state.wav_writer.write(data)
+                if state.wav_writer.elapsed() >= MAX_CHUNK_SECS:
+                    needs_rotate = True
+                else:
+                    needs_rotate = False
+            else:
+                needs_rotate = False
+
+        if needs_rotate:
+            print(f"Auto-splitting at {MAX_CHUNK_SECS // 60} min limit")
+            _rotate_file()
 
         if state.mode == 'vad' and not state.schedule_active:
             _handle_vad(dbfs, last_above_threshold)
@@ -569,7 +623,8 @@ header h1 span{color:var(--accent)}
 .status-pill{font-size:.78rem;padding:4px 12px;border-radius:20px;background:var(--border);white-space:nowrap}
 .status-pill.rec{background:rgba(239,83,80,.2);color:var(--red)}
 
-.mode-bar{display:flex;gap:0;background:var(--card);border-bottom:1px solid var(--border);padding:0 20px}
+.mode-bar{display:flex;gap:0;background:var(--card);border-bottom:1px solid var(--border);padding:0 20px;align-items:center}
+.mode-label{font-size:.72rem;text-transform:uppercase;letter-spacing:.5px;color:var(--dim);padding:10px 14px 10px 0;white-space:nowrap;border-right:1px solid var(--border);margin-right:4px}
 .mode-btn{flex:1;max-width:160px;padding:10px 0;border:none;background:none;color:var(--dim);font-size:.82rem;font-weight:600;cursor:pointer;border-bottom:2px solid transparent;transition:all .15s}
 .mode-btn.active{color:var(--accent);border-bottom-color:var(--accent)}
 
@@ -658,6 +713,7 @@ main{max-width:860px;margin:0 auto;padding:20px}
 </header>
 
 <div class="mode-bar">
+  <span class="mode-label">Recording Mode</span>
   <button class="mode-btn active" data-mode="continuous">Continuous</button>
   <button class="mode-btn" data-mode="vad">VAD</button>
   <button class="mode-btn" data-mode="scheduled">Scheduled</button>
