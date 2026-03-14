@@ -34,7 +34,7 @@ FORMAT = pyaudio.paInt16
 CHANNELS = 1
 RATE = 48000
 SAMPLE_WIDTH = 2
-MAX_CHUNK_SECS = 45 * 60
+FLUSH_INTERVAL = 60
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 SAVE_DIR = os.path.join(BASE_DIR, 'recordings')
@@ -185,10 +185,12 @@ class WavWriter:
         ts = datetime.now().strftime('%Y%m%d_%H%M%S')
         self.filepath = os.path.join(directory, f"bird_{ts}.wav")
         self.metadata = dict(metadata)
-        self.chunk_start = time.time()
+        self.start_time = time.time()
+        self.last_flush = time.time()
         self.frame_count = 0
 
-        self._wf = wave.open(self.filepath, 'wb')
+        self._file = open(self.filepath, 'wb')
+        self._wf = wave.open(self._file, 'wb')
         self._wf.setnchannels(CHANNELS)
         self._wf.setsampwidth(SAMPLE_WIDTH)
         self._wf.setframerate(RATE)
@@ -196,15 +198,28 @@ class WavWriter:
     def write(self, data):
         self._wf.writeframes(data)
         self.frame_count += 1
+        now = time.time()
+        if now - self.last_flush >= FLUSH_INTERVAL:
+            self.flush()
+            self.last_flush = now
+
+    def flush(self):
+        try:
+            self._file.flush()
+            os.fsync(self._file.fileno())
+        except (OSError, ValueError):
+            pass
 
     def elapsed(self):
-        return time.time() - self.chunk_start
+        return time.time() - self.start_time
 
     def close(self):
         if self._wf is None:
             return None
         self._wf.close()
+        self._file.close()
         self._wf = None
+        self._file = None
         if self.frame_count == 0:
             try:
                 os.remove(self.filepath)
@@ -273,14 +288,6 @@ def _stop_and_save():
         writer.close()
 
 
-def _rotate_file():
-    """Close current file and open a new one for the next segment."""
-    with state.lock:
-        old_writer = state.wav_writer
-        state.wav_writer = WavWriter(state.save_dir, state.metadata)
-    if old_writer:
-        old_writer.close()
-
 # ─────────────────────────────────────────────
 # Audio Engine (runs continuously)
 # ─────────────────────────────────────────────
@@ -320,16 +327,6 @@ def audio_engine():
         with state.lock:
             if state.recording and state.wav_writer:
                 state.wav_writer.write(data)
-                if state.wav_writer.elapsed() >= MAX_CHUNK_SECS:
-                    needs_rotate = True
-                else:
-                    needs_rotate = False
-            else:
-                needs_rotate = False
-
-        if needs_rotate:
-            print(f"Auto-splitting at {MAX_CHUNK_SECS // 60} min limit")
-            _rotate_file()
 
         if state.mode == 'vad' and not state.schedule_active:
             _handle_vad(dbfs, last_above_threshold)
@@ -381,9 +378,12 @@ def _handle_vad_in_schedule(dbfs, last_above):
 # System Health
 # ─────────────────────────────────────────────
 def get_system_health():
+    mem = psutil.virtual_memory()
     health = {
         'cpu': psutil.cpu_percent(interval=0),
-        'ram': psutil.virtual_memory().percent,
+        'ram': mem.percent,
+        'ram_used_mb': round(mem.used / 1048576),
+        'ram_total_mb': round(mem.total / 1048576),
         'disk': psutil.disk_usage('/').percent,
         'temp': None,
         'battery': None
@@ -641,6 +641,7 @@ main{max-width:860px;margin:0 auto;padding:20px}
 .meter-label{font-size:.75rem;color:var(--dim);text-transform:uppercase;letter-spacing:.5px;margin-bottom:8px}
 .meter-track{height:28px;background:#0d1117;border-radius:6px;overflow:hidden;position:relative}
 .meter-fill{height:100%;width:0%;border-radius:6px;transition:width .18s linear;background:linear-gradient(90deg,var(--green),var(--yellow),var(--red))}
+.mem-fill{height:100%;width:0%;border-radius:6px;transition:width .4s ease,background .4s ease;background:var(--green)}
 .meter-value{font-size:1.4rem;font-weight:700;margin-top:8px;font-variant-numeric:tabular-nums}
 .meter-threshold{position:absolute;top:0;bottom:0;width:2px;background:var(--accent);opacity:.7;z-index:2}
 
@@ -744,6 +745,16 @@ main{max-width:860px;margin:0 auto;padding:20px}
       <div class="h-card"><div class="label">Temp</div><div class="value" id="h-temp">--</div></div>
       <div class="h-card"><div class="label">RAM</div><div class="value" id="h-ram">--%</div></div>
       <div class="h-card" id="h-bat-card" style="display:none"><div class="label">Battery</div><div class="value" id="h-bat">--%</div></div>
+    </div>
+    <div class="meter-section" style="margin-top:16px">
+      <div class="meter-label">Memory Usage</div>
+      <div class="meter-track">
+        <div class="mem-fill" id="mem-fill"></div>
+      </div>
+      <div style="display:flex;justify-content:space-between;margin-top:6px">
+        <span style="font-size:.82rem;font-variant-numeric:tabular-nums" id="mem-text">-- / -- MB</span>
+        <span style="font-size:.82rem;color:var(--dim)" id="mem-pct">--%</span>
+      </div>
     </div>
     <details class="vad-settings">
       <summary>VAD Settings</summary>
@@ -893,6 +904,11 @@ socket.on('system_health', d => {
     document.getElementById('h-bat-card').style.display = '';
     document.getElementById('h-bat').textContent = d.battery + '%';
   }
+  const memFill = document.getElementById('mem-fill');
+  memFill.style.width = d.ram + '%';
+  memFill.style.background = d.ram > 85 ? 'var(--red)' : d.ram > 60 ? 'var(--yellow)' : 'var(--green)';
+  document.getElementById('mem-text').textContent = d.ram_used_mb + ' / ' + d.ram_total_mb + ' MB';
+  document.getElementById('mem-pct').textContent = d.ram + '%';
 });
 
 // ── VAD threshold marker on meter ──
