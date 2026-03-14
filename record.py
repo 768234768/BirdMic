@@ -1,6 +1,7 @@
 """
 Bird Recorder Dashboard
 Raspberry Pi field recorder with real-time monitoring, scheduling, and BWF metadata.
+...
 """
 
 import os
