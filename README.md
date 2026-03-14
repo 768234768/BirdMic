@@ -28,7 +28,7 @@ The INMP441 is an I2S microphone — it won't work until the Pi's operating syst
 Edit your boot config:
 
 ```bash
-sudo nano /boot/firmware/config.txt
+sudo vi /boot/firmware/config.txt
 ```
 
 > On older Raspberry Pi OS versions this file may be at `/boot/config.txt` instead.
